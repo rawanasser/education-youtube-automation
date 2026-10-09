@@ -1,0 +1,34 @@
+
+name: Educational Topic Generator
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "30 14 * * 1,4"
+
+permissions:
+  contents: read
+
+jobs:
+  generate-topics:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out project
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Generate topic ideas
+        run: python topic_generator.py
+
+      - name: Save topic ideas
+        uses: actions/upload-artifact@v7
+        with:
+          name: educational-topic-ideas
+          path: output/*.csv
+          retention-days: 14
+          if-no-files-found: error
