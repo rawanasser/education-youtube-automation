@@ -1,4 +1,4 @@
-```yaml
+
 name: YouTube Research
 
 on:
@@ -37,4 +37,3 @@ jobs:
             output/ranked_topics.csv
           if-no-files-found: error
           retention-days: 14
-```
