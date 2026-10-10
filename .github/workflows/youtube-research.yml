@@ -1,4 +1,4 @@
-
+```yaml
 name: YouTube Research
 
 on:
@@ -25,10 +25,16 @@ jobs:
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
         run: python youtube_research.py
 
-      - name: Upload research CSV
+      - name: Rank research topics
+        run: python topic_scorer.py
+
+      - name: Upload research and ranked CSVs
         uses: actions/upload-artifact@v7
         with:
           name: youtube-research-results
-          path: output/youtube_research.csv
+          path: |
+            output/youtube_research.csv
+            output/ranked_topics.csv
           if-no-files-found: error
           retention-days: 14
+```
