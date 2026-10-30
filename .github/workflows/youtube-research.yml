@@ -31,6 +31,9 @@ jobs:
       - name: Analyze topic opportunities
         run: python topic_opportunities.py
         
+      - name: Analyze recent topic performance
+        run: python recent_topic_analysis.py
+        
       - name: Upload research and ranked CSVs
         uses: actions/upload-artifact@v7
         with:
@@ -39,6 +42,7 @@ jobs:
            output/youtube_research.csv
            output/ranked_topics.csv
            output/topic_opportunities.csv
+           output/recent_topic_analysis.csv
           if-no-files-found: error
           retention-days: 14
           
