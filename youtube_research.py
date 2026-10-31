@@ -6,14 +6,17 @@ import os
 import sys
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 API_KEY = os.environ.get("YOUTUBE_API_KEY")
 OUTPUT_DIR = Path("output")
 OUTPUT_FILE = OUTPUT_DIR / "youtube_research.csv"
 
-# Research queries focused on science, physics, space, and AI.
+RECENT_DAYS = 90
+MAX_RESULTS = 50
+
 QUERIES = [
     "artificial intelligence explained for beginners",
     "machine learning neural networks explained educational",
@@ -28,7 +31,6 @@ API_BASE = "https://www.googleapis.com/youtube/v3"
 
 
 def parse_duration_seconds(value):
-    """Convert an ISO 8601 duration to seconds."""
     match = re.fullmatch(
         r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?",
         value or "",
@@ -45,12 +47,6 @@ def parse_duration_seconds(value):
 
 
 def classify_format(duration_seconds):
-    """
-    Classify a duration-based format candidate.
-
-    This is a heuristic, not a guarantee that YouTube
-    will classify the video as a Short.
-    """
     if duration_seconds == "":
         return "unknown"
 
@@ -61,7 +57,6 @@ def classify_format(duration_seconds):
 
 
 def api_get(endpoint, params):
-    """Call the YouTube Data API without exposing the API key."""
     params = {**params, "key": API_KEY}
 
     url = (
@@ -83,76 +78,117 @@ def api_get(endpoint, params):
             )
 
     except Exception as exc:
-        # Never print the request URL because it contains the key.
         raise RuntimeError(
             f"YouTube API request failed ({endpoint}): {exc}"
         ) from None
 
 
+def add_search_results(collected, query, search_pass, params):
+    print(f"[{search_pass}] Researching: {query}")
+
+    result = api_get(
+        "search",
+        {
+            "part": "snippet",
+            "type": "video",
+            "q": query,
+            "maxResults": MAX_RESULTS,
+            "relevanceLanguage": "en",
+            "safeSearch": "strict",
+            **params,
+        },
+    )
+
+    added = 0
+
+    for item in result.get("items", []):
+        video_id = item.get("id", {}).get("videoId")
+        snippet = item.get("snippet", {})
+
+        if not video_id:
+            continue
+
+        if video_id not in collected:
+            collected[video_id] = {
+                "video_id": video_id,
+                "title": snippet.get("title", ""),
+                "channel_title": snippet.get(
+                    "channelTitle", ""
+                ),
+                "published_at": snippet.get(
+                    "publishedAt", ""
+                ),
+                "views": "",
+                "likes": "",
+                "comments": "",
+                "duration_seconds": "",
+                "format_candidate": "unknown",
+                "matched_queries": set(),
+                "discovery_sources": set(),
+                "search_passes": set(),
+                "description": snippet.get(
+                    "description", ""
+                ),
+                "research_date_utc": datetime.now(
+                    timezone.utc
+                ).isoformat(),
+            }
+            added += 1
+
+        collected[video_id]["matched_queries"].add(query)
+        collected[video_id]["discovery_sources"].add(query)
+        collected[video_id]["search_passes"].add(search_pass)
+
+    print(
+        f"  Results returned: {len(result.get('items', []))}; "
+        f"new unique videos: {added}"
+    )
+
+
 def main():
     if not API_KEY:
-        print(
-            "ERROR: YOUTUBE_API_KEY environment variable is missing."
-        )
+        print("ERROR: YOUTUBE_API_KEY is missing.")
         sys.exit(1)
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     collected = {}
 
-    # Step 1: Search for relevant educational videos.
-    for query in QUERIES:
-        print(f"Researching query: {query}")
+    now = datetime.now(timezone.utc)
+    recent_cutoff = now - timedelta(days=RECENT_DAYS)
 
-        result = api_get(
-            "search",
+    published_after = recent_cutoff.isoformat(
+        timespec="seconds"
+    ).replace("+00:00", "Z")
+
+    # Pass 1: Historical discovery.
+    for query in QUERIES:
+        add_search_results(
+            collected,
+            query,
+            "historical",
             {
-                "part": "snippet",
-                "type": "video",
-                "q": query,
-                "maxResults": 10,
                 "order": "relevance",
-                "relevanceLanguage": "en",
-                "safeSearch": "strict",
             },
         )
 
-        for item in result.get("items", []):
-            video_id = item.get("id", {}).get("videoId")
-            snippet = item.get("snippet", {})
-
-            if not video_id:
-                continue
-
-            if video_id not in collected:
-                collected[video_id] = {
-                    "video_id": video_id,
-                    "title": snippet.get("title", ""),
-                    "channel_title": snippet.get(
-                        "channelTitle", ""
-                    ),
-                    "published_at": snippet.get(
-                        "publishedAt", ""
-                    ),
-                    "views": "",
-                    "likes": "",
-                    "comments": "",
-                    "duration_seconds": "",
-                    "format_candidate": "unknown",
-                    "matched_queries": set(),
-                    "description": snippet.get(
-                        "description", ""
-                    ),
-                    "research_date_utc": datetime.now(
-                        timezone.utc
-                    ).isoformat(),
-                }
-
-            collected[video_id]["matched_queries"].add(query)
+    # Pass 2: Recent discovery.
+    for query in QUERIES:
+        add_search_results(
+            collected,
+            query,
+            "recent",
+            {
+                "order": "date",
+                "publishedAfter": published_after,
+            },
+        )
 
     video_ids = list(collected.keys())
 
-    # Step 2: Fetch statistics and duration in batches.
+    print(f"\nUnique videos collected: {len(video_ids)}")
+
+    # Fetch video statistics and durations.
     for start in range(0, len(video_ids), 50):
         batch = video_ids[start:start + 50]
 
@@ -176,41 +212,28 @@ def main():
                 continue
 
             statistics = item.get("statistics", {})
-            content_details = item.get(
-                "contentDetails", {}
+            details = item.get("contentDetails", {})
+
+            row["views"] = statistics.get("viewCount", "")
+            row["likes"] = statistics.get("likeCount", "")
+            row["comments"] = statistics.get("commentCount", "")
+
+            duration = parse_duration_seconds(
+                details.get("duration", "")
             )
 
-            row["views"] = statistics.get(
-                "viewCount", ""
-            )
-            row["likes"] = statistics.get(
-                "likeCount", ""
-            )
-            row["comments"] = statistics.get(
-                "commentCount", ""
-            )
+            row["duration_seconds"] = duration
+            row["format_candidate"] = classify_format(duration)
 
-            duration_seconds = parse_duration_seconds(
-                content_details.get("duration", "")
-            )
-
-            row["duration_seconds"] = duration_seconds
-            row["format_candidate"] = classify_format(
-                duration_seconds
-            )
-
-        # Videos absent from the API response may be unavailable
-        # or inaccessible. Do not invent their statistics.
         missing_ids = set(batch) - returned_ids
 
         if missing_ids:
             print(
-                "Warning: statistics unavailable for "
-                f"{len(missing_ids)} video(s) in this batch."
+                f"Warning: {len(missing_ids)} videos "
+                "had unavailable statistics."
             )
 
-    # Step 3: Write the research CSV.
-    # The scorer reads this file separately and does not modify it.
+    # Preserve existing columns and add discovery metadata.
     columns = [
         "video_id",
         "title",
@@ -224,6 +247,8 @@ def main():
         "matched_queries",
         "description",
         "research_date_utc",
+        "discovery_sources",
+        "search_passes",
     ]
 
     with OUTPUT_FILE.open(
@@ -242,16 +267,37 @@ def main():
         for row in collected.values():
             output_row = row.copy()
 
-            output_row["matched_queries"] = "; ".join(
-                sorted(row["matched_queries"])
-            )
+            for field in (
+                "matched_queries",
+                "discovery_sources",
+                "search_passes",
+            ):
+                output_row[field] = "; ".join(
+                    sorted(row[field])
+                )
 
             writer.writerow(output_row)
 
-    print(
-        "Research complete. "
-        f"Videos collected: {len(collected)}"
+    historical_count = sum(
+        "historical" in row["search_passes"]
+        for row in collected.values()
     )
+
+    recent_count = sum(
+        "recent" in row["search_passes"]
+        for row in collected.values()
+    )
+
+    both_count = sum(
+        len(row["search_passes"]) == 2
+        for row in collected.values()
+    )
+
+    print("\nResearch complete.")
+    print(f"Unique videos: {len(collected)}")
+    print(f"Historical discoveries: {historical_count}")
+    print(f"Recent discoveries: {recent_count}")
+    print(f"Found in both passes: {both_count}")
     print(f"CSV saved to: {OUTPUT_FILE}")
 
 
