@@ -1,4 +1,3 @@
-
 import re
 import csv
 import json
@@ -14,7 +13,6 @@ API_KEY = os.environ.get("YOUTUBE_API_KEY")
 OUTPUT_DIR = Path("output")
 OUTPUT_FILE = OUTPUT_DIR / "youtube_research.csv"
 
-RECENT_DAYS = 90
 MAX_RESULTS = 50
 
 QUERIES = [
@@ -57,7 +55,15 @@ def classify_format(duration_seconds):
 
 
 def api_get(endpoint, params):
-    params = {**params, "key": API_KEY}
+    if not API_KEY:
+        raise RuntimeError(
+            "YOUTUBE_API_KEY is missing."
+        )
+
+    params = {
+        **params,
+        "key": API_KEY,
+    }
 
     url = (
         f"{API_BASE}/{endpoint}?"
@@ -66,25 +72,43 @@ def api_get(endpoint, params):
 
     request = urllib.request.Request(
         url,
-        headers={"Accept": "application/json"},
+        headers={
+            "Accept": "application/json"
+        },
     )
 
     try:
         with urllib.request.urlopen(
-            request, timeout=30
+            request,
+            timeout=30,
         ) as response:
+
             return json.loads(
                 response.read().decode("utf-8")
             )
 
     except Exception as exc:
         raise RuntimeError(
-            f"YouTube API request failed ({endpoint}): {exc}"
+            f"YouTube API request failed "
+            f"({endpoint}): {exc}"
         ) from None
 
 
-def add_search_results(collected, query, search_pass, params):
-    print(f"[{search_pass}] Researching: {query}")
+def iso_utc(value):
+    return value.isoformat(
+        timespec="seconds"
+    ).replace("+00:00", "Z")
+
+
+def add_search_results(
+    collected,
+    query,
+    search_pass,
+    params,
+):
+    print(
+        f"[{search_pass}] Researching: {query}"
+    )
 
     result = api_get(
         "search",
@@ -99,11 +123,20 @@ def add_search_results(collected, query, search_pass, params):
         },
     )
 
+    items = result.get("items", [])
+
     added = 0
 
-    for item in result.get("items", []):
-        video_id = item.get("id", {}).get("videoId")
-        snippet = item.get("snippet", {})
+    for item in items:
+        video_id = item.get(
+            "id",
+            {}
+        ).get("videoId")
+
+        snippet = item.get(
+            "snippet",
+            {}
+        )
 
         if not video_id:
             continue
@@ -111,12 +144,17 @@ def add_search_results(collected, query, search_pass, params):
         if video_id not in collected:
             collected[video_id] = {
                 "video_id": video_id,
-                "title": snippet.get("title", ""),
+                "title": snippet.get(
+                    "title",
+                    "",
+                ),
                 "channel_title": snippet.get(
-                    "channelTitle", ""
+                    "channelTitle",
+                    "",
                 ),
                 "published_at": snippet.get(
-                    "publishedAt", ""
+                    "publishedAt",
+                    "",
                 ),
                 "views": "",
                 "likes": "",
@@ -127,41 +165,57 @@ def add_search_results(collected, query, search_pass, params):
                 "discovery_sources": set(),
                 "search_passes": set(),
                 "description": snippet.get(
-                    "description", ""
+                    "description",
+                    "",
                 ),
                 "research_date_utc": datetime.now(
                     timezone.utc
                 ).isoformat(),
             }
+
             added += 1
 
-        collected[video_id]["matched_queries"].add(query)
-        collected[video_id]["discovery_sources"].add(query)
-        collected[video_id]["search_passes"].add(search_pass)
+        collected[video_id][
+            "matched_queries"
+        ].add(query)
+
+        collected[video_id][
+            "discovery_sources"
+        ].add(query)
+
+        collected[video_id][
+            "search_passes"
+        ].add(search_pass)
 
     print(
-        f"  Results returned: {len(result.get('items', []))}; "
+        f"  Results returned: {len(items)}; "
         f"new unique videos: {added}"
     )
 
 
 def main():
     if not API_KEY:
-        print("ERROR: YOUTUBE_API_KEY is missing.")
+        print(
+            "ERROR: YOUTUBE_API_KEY is missing."
+        )
         sys.exit(1)
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    OUTPUT_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
     collected = {}
 
     now = datetime.now(timezone.utc)
-    recent_cutoff = now - timedelta(days=RECENT_DAYS)
 
-    published_after = recent_cutoff.isoformat(
-        timespec="seconds"
-    ).replace("+00:00", "Z")
+    # ---------------------------------------------------------
+    # PASS 1: Historical discovery
+    #
+    # Purpose:
+    # Find established videos and long-term winners.
+    # ---------------------------------------------------------
 
-    # Pass 1: Historical discovery.
     for query in QUERIES:
         add_search_results(
             collected,
@@ -172,68 +226,186 @@ def main():
             },
         )
 
-    # Pass 2: Recent discovery.
+    # ---------------------------------------------------------
+    # PASS 2: Recent 8-30 day discovery
+    #
+    # Purpose:
+    # Measure early traction while avoiding videos that
+    # are only a few hours or days old.
+    # ---------------------------------------------------------
+
+    recent_8_start = now - timedelta(
+        days=30
+    )
+
+    recent_8_end = now - timedelta(
+        days=8
+    )
+
+    published_after_8_30 = iso_utc(
+        recent_8_start
+    )
+
+    published_before_8_30 = iso_utc(
+        recent_8_end
+    )
+
     for query in QUERIES:
         add_search_results(
             collected,
             query,
-            "recent",
+            "recent_8_30",
             {
-                "order": "date",
-                "publishedAfter": published_after,
+                "order": "relevance",
+                "publishedAfter": published_after_8_30,
+                "publishedBefore": published_before_8_30,
             },
         )
 
-    video_ids = list(collected.keys())
+    # ---------------------------------------------------------
+    # PASS 3: Recent 31-90 day discovery
+    #
+    # Purpose:
+    # Measure more established recent performance.
+    # ---------------------------------------------------------
 
-    print(f"\nUnique videos collected: {len(video_ids)}")
+    recent_31_start = now - timedelta(
+        days=90
+    )
 
-    # Fetch video statistics and durations.
-    for start in range(0, len(video_ids), 50):
-        batch = video_ids[start:start + 50]
+    recent_31_end = now - timedelta(
+        days=31
+    )
+
+    published_after_31_90 = iso_utc(
+        recent_31_start
+    )
+
+    published_before_31_90 = iso_utc(
+        recent_31_end
+    )
+
+    for query in QUERIES:
+        add_search_results(
+            collected,
+            query,
+            "recent_31_90",
+            {
+                "order": "relevance",
+                "publishedAfter": published_after_31_90,
+                "publishedBefore": published_before_31_90,
+            },
+        )
+
+    video_ids = list(
+        collected.keys()
+    )
+
+    print(
+        f"\nUnique videos collected: "
+        f"{len(video_ids)}"
+    )
+
+    # ---------------------------------------------------------
+    # Fetch statistics and durations
+    # ---------------------------------------------------------
+
+    for start in range(
+        0,
+        len(video_ids),
+        50,
+    ):
+        batch = video_ids[
+            start:start + 50
+        ]
 
         result = api_get(
             "videos",
             {
-                "part": "statistics,contentDetails",
+                "part": (
+                    "statistics,"
+                    "contentDetails"
+                ),
                 "id": ",".join(batch),
             },
         )
 
         returned_ids = set()
 
-        for item in result.get("items", []):
-            video_id = item.get("id")
-            returned_ids.add(video_id)
+        for item in result.get(
+            "items",
+            [],
+        ):
+            video_id = item.get(
+                "id"
+            )
 
-            row = collected.get(video_id)
+            returned_ids.add(
+                video_id
+            )
+
+            row = collected.get(
+                video_id
+            )
 
             if row is None:
                 continue
 
-            statistics = item.get("statistics", {})
-            details = item.get("contentDetails", {})
+            statistics = item.get(
+                "statistics",
+                {}
+            )
 
-            row["views"] = statistics.get("viewCount", "")
-            row["likes"] = statistics.get("likeCount", "")
-            row["comments"] = statistics.get("commentCount", "")
+            details = item.get(
+                "contentDetails",
+                {}
+            )
+
+            row["views"] = statistics.get(
+                "viewCount",
+                ""
+            )
+
+            row["likes"] = statistics.get(
+                "likeCount",
+                ""
+            )
+
+            row["comments"] = statistics.get(
+                "commentCount",
+                ""
+            )
 
             duration = parse_duration_seconds(
-                details.get("duration", "")
+                details.get(
+                    "duration",
+                    "",
+                )
             )
 
             row["duration_seconds"] = duration
-            row["format_candidate"] = classify_format(duration)
 
-        missing_ids = set(batch) - returned_ids
+            row["format_candidate"] = (
+                classify_format(
+                    duration
+                )
+            )
+
+        missing_ids = (
+            set(batch) - returned_ids
+        )
 
         if missing_ids:
             print(
-                f"Warning: {len(missing_ids)} videos "
+                f"Warning: "
+                f"{len(missing_ids)} videos "
                 "had unavailable statistics."
             )
 
-    # Preserve existing columns and add discovery metadata.
+    # ---------------------------------------------------------
+    # Write CSV
+    # ---------------------------------------------------------
+
     columns = [
         "video_id",
         "title",
@@ -256,6 +428,7 @@ def main():
         newline="",
         encoding="utf-8-sig",
     ) as file:
+
         writer = csv.DictWriter(
             file,
             fieldnames=columns,
@@ -265,6 +438,7 @@ def main():
         writer.writeheader()
 
         for row in collected.values():
+
             output_row = row.copy()
 
             for field in (
@@ -273,32 +447,73 @@ def main():
                 "search_passes",
             ):
                 output_row[field] = "; ".join(
-                    sorted(row[field])
+                    sorted(
+                        row[field]
+                    )
                 )
 
-            writer.writerow(output_row)
+            writer.writerow(
+                output_row
+            )
 
-    historical_count = sum(
-        "historical" in row["search_passes"]
-        for row in collected.values()
-    )
+    # ---------------------------------------------------------
+    # Summary
+    # ---------------------------------------------------------
 
-    recent_count = sum(
-        "recent" in row["search_passes"]
-        for row in collected.values()
-    )
+    pass_counts = {
+        "historical": 0,
+        "recent_8_30": 0,
+        "recent_31_90": 0,
+    }
 
-    both_count = sum(
-        len(row["search_passes"]) == 2
-        for row in collected.values()
-    )
+    for row in collected.values():
+        for search_pass in pass_counts:
+            if search_pass in row[
+                "search_passes"
+            ]:
+                pass_counts[
+                    search_pass
+                ] += 1
 
     print("\nResearch complete.")
-    print(f"Unique videos: {len(collected)}")
-    print(f"Historical discoveries: {historical_count}")
-    print(f"Recent discoveries: {recent_count}")
-    print(f"Found in both passes: {both_count}")
-    print(f"CSV saved to: {OUTPUT_FILE}")
+    print(
+        f"Unique videos: "
+        f"{len(collected)}"
+    )
+
+    print(
+        f"Historical discoveries: "
+        f"{pass_counts['historical']}"
+    )
+
+    print(
+        f"Recent 8-30 day discoveries: "
+        f"{pass_counts['recent_8_30']}"
+    )
+
+    print(
+        f"Recent 31-90 day discoveries: "
+        f"{pass_counts['recent_31_90']}"
+    )
+
+    both_recent_count = sum(
+        (
+            "recent_8_30" in row["search_passes"]
+            and
+            "recent_31_90" in row["search_passes"]
+        )
+        for row in collected.values()
+    )
+
+    print(
+        f"Found in both recent windows: "
+        f"{both_recent_count}"
+    )
+
+    print(
+        f"CSV saved to: "
+        f"{OUTPUT_FILE}"
+    )
 
 
 if __name__ == "__main__":
