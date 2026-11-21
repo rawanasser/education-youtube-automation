@@ -34,6 +34,9 @@ jobs:
       - name: Analyze recent topic performance
         run: python recent_topic_analysis.py
         
+      - name: Analyze physics subtopics
+        run: python subtopic_analysis.py
+        
       - name: Upload research and ranked CSVs
         uses: actions/upload-artifact@v7
         with:
@@ -43,6 +46,7 @@ jobs:
            output/ranked_topics.csv
            output/topic_opportunities.csv
            output/recent_topic_analysis.csv
+            output/subtopic_analysis.csv
           if-no-files-found: error
           retention-days: 14
           
