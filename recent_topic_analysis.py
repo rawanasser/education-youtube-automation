@@ -1,354 +1,325 @@
 import csv
-import os
+import statistics
 from collections import defaultdict
 from datetime import datetime, timezone
-from statistics import median
 
 INPUT_FILE = "output/youtube_research.csv"
 OUTPUT_FILE = "output/recent_topic_analysis.csv"
 
-TARGET_TOPICS = {
-    "artificial intelligence explained for beginners": "AI for Beginners",
-    "planets black holes astrophysics explained": "Black Holes & Astrophysics",
-    "physics explained visually for beginners": "Visual Physics",
-}
+TOPIC_FAMILIES = [
+    "Visual Physics",
+    "General Physics",
+    "Quantum Physics",
+    "Astrophysics & Space",
+    "AI for Beginners",
+    "Machine Learning",
+]
 
 
-def parse_date(value):
+def parse_datetime(value):
     if not value:
         return None
 
     try:
-        return datetime.fromisoformat(
-            value.strip().replace("Z", "+00:00")
-        )
-    except (ValueError, TypeError):
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
         return None
 
 
-def number(value):
+def parse_float(value):
     try:
         return float(value)
-    except (ValueError, TypeError):
+    except (TypeError, ValueError):
         return None
 
 
-def get_format(duration):
-    if duration is None:
-        return "unknown"
-
-    if duration <= 180:
-        return "short_form_candidate"
-
-    return "long_form_candidate"
+def parse_int(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
-def safe_median(items, field):
-    values = [
-        video[field]
-        for video in items
-        if video[field] is not None
-    ]
+def median(values):
+    values = [v for v in values if v is not None]
 
     if not values:
+        return None
+
+    return statistics.median(values)
+
+
+def classify_cohort(age_days):
+    if age_days < 0:
+        return None
+
+    if age_days <= 7:
+        return "0_7"
+
+    if age_days <= 30:
+        return "8_30"
+
+    if age_days <= 90:
+        return "31_90"
+
+    return None
+
+
+def calculate_lifetime_views_per_day(views, published_at, research_date):
+    if views is None or published_at is None or research_date is None:
+        return None
+
+    age_seconds = (research_date - published_at).total_seconds()
+
+    if age_seconds <= 0:
+        return None
+
+    age_days = age_seconds / 86400
+
+    return views / age_days
+
+
+def split_families(value):
+    if not value:
+        return []
+
+    return [
+        family.strip()
+        for family in value.split(";")
+        if family.strip()
+    ]
+
+
+def format_number(value):
+    if value is None:
         return ""
 
-    return round(median(values), 2)
+    if isinstance(value, float):
+        if value.is_integer():
+            return str(int(value))
 
+        return round(value, 2)
 
-def count_format(items, format_name):
-    return sum(
-        video["format"] == format_name
-        for video in items
-    )
-
-
-def unique_channels(items):
-    return len({
-        video["channel"]
-        for video in items
-        if video["channel"]
-    })
-
-
-def classify_evidence(
-    days_8_30,
-    days_31_90,
-):
-    established = len(days_31_90)
-    early = len(days_8_30)
-
-    if established >= 10:
-        return "Strong recent sample"
-
-    if established >= 5:
-        return "Moderate recent sample"
-
-    if established + early >= 5:
-        return "Limited recent sample; mostly early-stage videos"
-
-    return "Insufficient recent sample"
+    return value
 
 
 def main():
-    if not os.path.exists(INPUT_FILE):
-        raise FileNotFoundError(
-            f"Missing input: {INPUT_FILE}"
-        )
-
     now = datetime.now(timezone.utc)
 
-    groups = defaultdict(list)
-
-    with open(
-        INPUT_FILE,
-        "r",
-        encoding="utf-8-sig",
-        newline=""
-    ) as file:
-
-        reader = csv.DictReader(file)
-
-        required = {
-            "published_at",
-            "views",
-            "duration_seconds",
-            "channel_title",
-            "matched_queries",
+    # family -> cohort -> video_id -> row
+    family_data = {
+        family: {
+            "0_7": {},
+            "8_30": {},
+            "31_90": {},
         }
+        for family in TOPIC_FAMILIES
+    }
 
-        missing = required - set(reader.fieldnames or [])
-
-        if missing:
-            raise ValueError(
-                f"Missing required columns: {sorted(missing)}"
-            )
+    with open(INPUT_FILE, "r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
 
         for row in reader:
-            matched_queries = row.get(
-                "matched_queries",
-                ""
+            video_id = row.get("video_id", "").strip()
+
+            if not video_id:
+                continue
+
+            published_at = parse_datetime(row.get("published_at"))
+            if published_at is None:
+                continue
+
+            age_days = (now - published_at).total_seconds() / 86400
+
+            cohort = classify_cohort(age_days)
+
+            if cohort is None:
+                continue
+
+            families = split_families(row.get("topic_families"))
+
+            views = parse_int(row.get("views"))
+            duration_seconds = parse_float(row.get("duration_seconds"))
+
+            lifetime_velocity = calculate_lifetime_views_per_day(
+                views,
+                published_at,
+                now,
             )
 
-            for query in matched_queries.split(";"):
-                query = query.strip().lower()
+            enriched_row = {
+                "video_id": video_id,
+                "channel_title": row.get("channel_title", ""),
+                "views": views,
+                "duration_seconds": duration_seconds,
+                "lifetime_views_per_day": lifetime_velocity,
+            }
 
-                if query not in TARGET_TOPICS:
+            for family in families:
+                if family not in family_data:
                     continue
 
-                published = parse_date(
-                    row.get("published_at")
-                )
-
-                if published is None:
-                    continue
-
-                age_days = (
-                    now - published
-                ).total_seconds() / 86400
-
-                # Ignore future-dated videos caused by clock/API
-                # differences.
-                if age_days < 0:
-                    continue
-
-                views = number(row.get("views"))
-                duration = number(
-                    row.get("duration_seconds")
-                )
-
-                # Lifetime views divided by age.
-                # This is a normalized lifetime velocity,
-                # NOT recent views gained per day.
-                if views is not None and age_days > 0:
-                    lifetime_views_per_day = (
-                        views / age_days
-                    )
-                else:
-                    lifetime_views_per_day = None
-
-                groups[query].append({
-                    "published": published,
-                    "age_days": age_days,
-                    "views": views,
-                    "lifetime_views_per_day":
-                        lifetime_views_per_day,
-                    "channel": row.get(
-                        "channel_title",
-                        ""
-                    ).strip(),
-                    "format": get_format(duration),
-                })
+                # Deduplicate videos within each family.
+                family_data[family][cohort][video_id] = enriched_row
 
     results = []
 
-    for query, topic_name in TARGET_TOPICS.items():
-        videos = groups[query]
+    for family in TOPIC_FAMILIES:
+        data = family_data[family]
 
-        # Age cohorts:
-        #
-        # 0-7 days:
-        # Too new for meaningful performance comparison.
-        #
-        # 8-30 days:
-        # Early traction.
-        #
-        # 31-90 days:
-        # Established recent performance.
-        #
-        too_new = [
-            video
-            for video in videos
-            if 0 <= video["age_days"] <= 7
+        videos_0_7 = list(data["0_7"].values())
+        videos_8_30 = list(data["8_30"].values())
+        videos_31_90 = list(data["31_90"].values())
+
+        channels_8_30 = {
+            video["channel_title"]
+            for video in videos_8_30
+            if video["channel_title"]
+        }
+
+        channels_31_90 = {
+            video["channel_title"]
+            for video in videos_31_90
+            if video["channel_title"]
+        }
+
+        channels_8_90 = channels_8_30 | channels_31_90
+
+        views_8_30 = [
+            video["views"]
+            for video in videos_8_30
+            if video["views"] is not None
         ]
 
-        early = [
-            video
-            for video in videos
-            if 7 < video["age_days"] <= 30
+        views_31_90 = [
+            video["views"]
+            for video in videos_31_90
+            if video["views"] is not None
         ]
 
-        established = [
-            video
-            for video in videos
-            if 30 < video["age_days"] <= 90
+        velocity_8_30 = [
+            video["lifetime_views_per_day"]
+            for video in videos_8_30
+            if video["lifetime_views_per_day"] is not None
         ]
 
-        recent_90 = early + established
+        velocity_31_90 = [
+            video["lifetime_views_per_day"]
+            for video in videos_31_90
+            if video["lifetime_views_per_day"] is not None
+        ]
+
+        short_8_30 = sum(
+            1
+            for video in videos_8_30
+            if video["duration_seconds"] is not None
+            and video["duration_seconds"] <= 180
+        )
+
+        long_8_30 = len(videos_8_30) - short_8_30
+
+        short_31_90 = sum(
+            1
+            for video in videos_31_90
+            if video["duration_seconds"] is not None
+            and video["duration_seconds"] <= 180
+        )
+
+        long_31_90 = len(videos_31_90) - short_31_90
+
+        total_recent = len(videos_8_30) + len(videos_31_90)
+
+        if total_recent >= 60:
+            evidence_level = "Strong recent sample"
+        elif total_recent >= 30:
+            evidence_level = "Moderate recent sample"
+        elif total_recent >= 10:
+            evidence_level = "Limited recent sample"
+        else:
+            evidence_level = "Insufficient recent sample"
 
         results.append({
-            "topic": topic_name,
-
-            "total_videos_found": len(videos),
-
-            # Age distribution
-            "videos_0_7_days": len(too_new),
-            "videos_8_30_days": len(early),
-            "videos_31_90_days": len(established),
-
-            # Channels
-            "channels_8_30_days": unique_channels(early),
-            "channels_31_90_days": unique_channels(
-                established
+            "topic": family,
+            "total_videos_found": (
+                len(videos_0_7)
+                + len(videos_8_30)
+                + len(videos_31_90)
             ),
-            "channels_8_90_days": unique_channels(
-                recent_90
+            "videos_0_7_days": len(videos_0_7),
+            "videos_8_30_days": len(videos_8_30),
+            "videos_31_90_days": len(videos_31_90),
+            "channels_8_30_days": len(channels_8_30),
+            "channels_31_90_days": len(channels_31_90),
+            "channels_8_90_days": len(channels_8_90),
+            "median_views_8_30_days": format_number(
+                median(views_8_30)
             ),
-
-            # Performance: early traction
-            "median_views_8_30_days": safe_median(
-                early,
-                "views"
+            "median_lifetime_views_per_day_8_30": format_number(
+                median(velocity_8_30)
             ),
-            "median_lifetime_views_per_day_8_30": safe_median(
-                early,
-                "lifetime_views_per_day"
+            "median_views_31_90_days": format_number(
+                median(views_31_90)
             ),
-
-            # Performance: established recent
-            "median_views_31_90_days": safe_median(
-                established,
-                "views"
+            "median_lifetime_views_per_day_31_90": format_number(
+                median(velocity_31_90)
             ),
-            "median_lifetime_views_per_day_31_90": safe_median(
-                established,
-                "lifetime_views_per_day"
-            ),
-
-            # Format distribution
-            "short_candidates_8_30_days": count_format(
-                early,
-                "short_form_candidate"
-            ),
-            "long_candidates_8_30_days": count_format(
-                early,
-                "long_form_candidate"
-            ),
-
-            "short_candidates_31_90_days": count_format(
-                established,
-                "short_form_candidate"
-            ),
-            "long_candidates_31_90_days": count_format(
-                established,
-                "long_form_candidate"
-            ),
-
-            # Evidence quality
-            "evidence_level": classify_evidence(
-                early,
-                established
-            ),
-
+            "short_candidates_8_30_days": short_8_30,
+            "long_candidates_8_30_days": long_8_30,
+            "short_candidates_31_90_days": short_31_90,
+            "long_candidates_31_90_days": long_31_90,
+            "evidence_level": evidence_level,
             "evidence_note": (
-                "0-7 day videos are tracked separately "
-                "but excluded from performance comparison. "
-                "8-30 day videos indicate early traction; "
-                "31-90 day videos provide stronger recent "
-                "performance evidence. Metrics are "
-                "observational and not predictions."
+                "0-7 day videos are tracked separately but excluded "
+                "from performance comparison. 8-30 day videos indicate "
+                "early traction; 31-90 day videos provide stronger recent "
+                "performance evidence. Metrics are observational and not "
+                "predictions. Videos may belong to multiple topic families."
             ),
         })
 
-    os.makedirs("output", exist_ok=True)
+    fieldnames = [
+        "topic",
+        "total_videos_found",
+        "videos_0_7_days",
+        "videos_8_30_days",
+        "videos_31_90_days",
+        "channels_8_30_days",
+        "channels_31_90_days",
+        "channels_8_90_days",
+        "median_views_8_30_days",
+        "median_lifetime_views_per_day_8_30",
+        "median_views_31_90_days",
+        "median_lifetime_views_per_day_31_90",
+        "short_candidates_8_30_days",
+        "long_candidates_8_30_days",
+        "short_candidates_31_90_days",
+        "long_candidates_31_90_days",
+        "evidence_level",
+        "evidence_note",
+    ]
 
     with open(
         OUTPUT_FILE,
         "w",
-        encoding="utf-8-sig",
-        newline=""
-    ) as file:
-
-        fieldnames = [
-            "topic",
-            "total_videos_found",
-
-            "videos_0_7_days",
-            "videos_8_30_days",
-            "videos_31_90_days",
-
-            "channels_8_30_days",
-            "channels_31_90_days",
-            "channels_8_90_days",
-
-            "median_views_8_30_days",
-            "median_lifetime_views_per_day_8_30",
-
-            "median_views_31_90_days",
-            "median_lifetime_views_per_day_31_90",
-
-            "short_candidates_8_30_days",
-            "long_candidates_8_30_days",
-
-            "short_candidates_31_90_days",
-            "long_candidates_31_90_days",
-
-            "evidence_level",
-            "evidence_note",
-        ]
-
-        writer = csv.DictWriter(
-            file,
-            fieldnames=fieldnames
-        )
-
+        encoding="utf-8",
+        newline="",
+    ) as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(results)
 
-    print(
-        f"Recent topic analysis saved to {OUTPUT_FILE}"
-    )
-
-    print()
+    print("\nRecent Topic Analysis")
+    print("=" * 80)
 
     for result in results:
         print(
             f"{result['topic']}: "
-            f"0-7d={result['videos_0_7_days']}, "
             f"8-30d={result['videos_8_30_days']}, "
-            f"31-90d={result['videos_31_90_days']} | "
+            f"31-90d={result['videos_31_90_days']}, "
             f"evidence={result['evidence_level']}"
         )
+
+    print(f"\nSaved: {OUTPUT_FILE}")
 
 
 if __name__ == "__main__":
